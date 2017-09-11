@@ -1,0 +1,336 @@
+---
+title: 'Spam Filter using GBM/SVM'
+author: "Jeremy Holcombe"
+date: "4/19/2017"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In this notebook, we'll attempt to make a spam filter. This dataset comes from the UCI Machine Learning repository, where someone has already created a nice feature matrix for us, which we will call X. Each row in X is an individual email and each column corresponds to the number of each word or character that appears in that email, as well as three different numerical measures regarding capital letters (average length of consecutive capitals, longest sequence of consecutive capitals, and total number of capital letters). The response variable, *Y*, is given by the user supplied label marking that email as either spam (*Y* = 1) or not (*Y* = 0).
+
+This function will produce a misclassification matrix, which will be useful for us when we evaluate our results.
+\vspace*{1\baselineskip}
+```{r}
+# Credit: Darren Homrighausen (http://www.stat.colostate.edu/~darrenho/) for
+# this function.
+miss.class <- function (pred.class, true.class, produceOutput=F) {
+  confusion.mat <- table(pred.class, true.class)
+  if (produceOutput) {
+    return(1 - sum(diag(confusion.mat)) / sum(confusion.mat))
+  } else {
+    print('miss-class')
+    print(1 - sum(diag(confusion.mat)) / sum(confusion.mat))
+    print('confusion mat')
+    print(confusion.mat)
+  }
+}
+
+
+```
+
+Let's load the R data set `spam.Rdata`.
+
+``` {r}
+
+load("spam.Rdata")
+
+train <- spam$train
+test  <- !train
+X     <- spam$XdataF[train, ]
+X_0   <- spam$XdataF[test, ]
+Y     <- as.character(factor(spam$Y[train]))
+Y_0   <- factor(spam$Y[test])
+
+```
+
+Here we use a common `R` implementation of gradient boosting machines, `gbm`. The 3 main choices involved in boosting trees are: 
+
+* the number of boosting iterations (*B*)
+* the learning rate ($\lambda$)
+* the tree complexity (*M*)
+
+```{r results='hold'}
+
+require(gbm)
+
+lambdas       <- c(0.001, 0.01, 0.1)
+depths        <- c(1, 2, 3)
+iterations   <- c(250, 500, 1000, 2000)
+distribution <- "bernoulli"
+
+# Fit a boosted tree with different B, lambda, and M
+for (lambda in lambdas) {
+  for (depth in depths) {
+    for (iteration in iterations) {
+      gbm.fit <- gbm(Y ~ ., data = X,
+                     distribution = distribution,
+                     n.trees = iteration,
+                     shrinkage = lambda,
+                     interaction.depth = depth,
+                     verbose = F)
+
+      Y.hat <- predict.gbm(gbm.fit, X_0, n.trees = iteration, type="response")
+      Y.hat[Y.hat >= 0.5] <- 1
+      Y.hat[Y.hat <  0.5] <- 0
+
+      print(paste("Lambda=", lambda, ", M=", depth, ", iterations=",
+            iteration, ", misclassification rate:",
+            round(miss.class(Y.hat, Y_0, produceOutput = T), 4)))
+    }
+  }
+}
+
+```
+
+Below is a discussion of how the performance of the model changed as each of these parameters changed:
+
+i. *B*
+The relative performance of the boosted tree for varying boosting iterations seems to depend on the values of the learning rate and tree complexity. When the learning rate was very small (0.001), the misclassification rate decreased monotonically with each increase in boosting iterations. This is expected as it would take many more iterations to reach a global minimum if each gradient step is very small.
+
+With a much faster learning rate (0.1), the model seemed to begin overfitting between 500 and 1,000 iterations.
+
+ii. $\lambda$
+The model seemed to perform better with certain combinations of the learning rate, tree complexity, and number of boosting iterations. With a very small $\lambda$, there were not enough iterations to achieve the minimum risk model, so the misclassification rate remained relatively high even with 2,000 iterations. With a $\lambda$ of 0.01 and 0.1, the lowest misclassification rate (0.0244) was achieved with varying levels of complexity and number of iterations.
+
+iii. *M*
+The models with deeper trees (greater complexity) tended to perform better when the learning rate was relatively small (0.001, 0.01), but had mixed results when the rate was 0.1.
+
+
+```{r results='hold'}
+
+lambdas       <- c(0.001, 0.01, 0.1)
+depths        <- c(1, 2, 3)
+iterations   <- c(250, 500, 1000, 2000)
+distribution <- "adaboost"
+
+# Fit a boosted tree with different B, lambda, and M
+for (lambda in lambdas) {
+  for (depth in depths) {
+    for (iteration in iterations) {
+      gbm.fit <- gbm(Y ~ ., data = X,
+                     distribution = distribution,
+                     n.trees = iteration,
+                     shrinkage = lambda,
+                     interaction.depth = depth,
+                     verbose = F)
+
+      Y.hat <- predict.gbm(gbm.fit, X_0, n.trees = iteration, type="response")
+      Y.hat[Y.hat >= 0.5] <- 1
+      Y.hat[Y.hat <  0.5] <- 0
+
+      print(paste("Lambda=", lambda, ", M=", depth, ", iterations=",
+            iteration, ", misclassification rate:",
+            round(miss.class(Y.hat, Y_0, produceOutput = T), 4)))
+    }
+  }
+}
+
+```
+
+Boosting trees with Adaboost loss instead of bernoulli loss seems to result in different misclassification rates for pairs of tuning parameter configurations. However, the best model for each loss function achieved an identical misclassification rate on the test data, although with slightly different tuning parameter configurations. Note this is likely due to the stochastic nature of the fit.
+
+We'll go ahead and fit the gbm model using these parameters.
+
+```{r results='hold'}
+
+lambda       <- 0.1
+depth        <- 3
+iteration    <- 250
+distribution <- "bernoulli"
+
+gbm.fit <- gbm(Y ~ ., data = X,
+                     distribution = distribution,
+                     n.trees = iteration,
+                     shrinkage = lambda,
+                     interaction.depth = depth,
+                     verbose = F)
+
+summary(gbm.fit)
+
+```
+
+Based on the relative influence measure computed from the boosted trees, it appears that *punc_exclam*, *punc_dollar*, and *remove* are the most important features in determining whether an email is *spam* or *ham*.
+
+Now let's compare training and test misclassification rates for boosting vs. bagging.
+
+```{r results='hold'}
+
+require(randomForest)
+
+df.plot <- data.frame(matrix(nrow=9, ncol=5))
+colnames(df.plot) <- c("b", "boost.train", "boost.test",
+                                    "bag.train", "bag.test")
+Bgrid <- c(3, 100, 250, 500, 750, 1000, 2000, 3000, 5000)
+i <- 0
+
+for (B in Bgrid) {
+  i <- i + 1
+
+  # Boosting trees
+  gbm.fit <- gbm(Y ~ ., data = X,
+                     distribution = 'bernoulli',
+                     n.trees = B,
+                     shrinkage = 0.1,
+                     interaction.depth = 2,
+                     verbose = F)
+  boost.yhat.train <- predict.gbm(gbm.fit, X, n.trees = B, type="response")
+  boost.yhat.train[boost.yhat.train >= 0.5] <- 1
+  boost.yhat.train[boost.yhat.train <  0.5] <- 0
+  boost.yhat.test <- predict.gbm(gbm.fit, X_0, n.trees = i, type="response")
+  boost.yhat.test[boost.yhat.test >= 0.5] <- 1
+  boost.yhat.test[boost.yhat.test <  0.5] <- 0
+
+  # Bagging trees
+  out.rf         <- randomForest(X, as.factor(Y), ntree=B, mtry=ncol(X))
+  bag.yhat.train <- predict(out.rf, X,   type='class')
+  bag.yhat.test  <- predict(out.rf, X_0, type='class')
+
+  df.plot[i, ] <- list(B,
+                       miss.class(boost.yhat.train, Y,   produceOutput = T),
+                       miss.class(boost.yhat.test,  Y_0, produceOutput = T),
+                       miss.class(bag.yhat.train,   Y,   produceOutput = T),
+                       miss.class(bag.yhat.test,    Y_0, produceOutput = T))
+}
+
+require(reshape2)
+require(ggplot2)
+mdf <- melt(df.plot, id='b')
+ggplot(mdf, aes(x=b, y=value, group=variable, colour=variable)) +
+  geom_line() +
+  geom_point(size=4, shape=21, fill='white') +
+  xlab("Number of Iterations/Trees") + ylab("Misclassification Rate")
+
+
+```
+
+```{r results='hold'}
+
+# Best boosted trees
+lambda       <- 0.1
+depth        <- 3
+iteration    <- 250
+distribution <- "bernoulli"
+
+gbm.fit <- gbm(Y ~ ., data = X,
+                     distribution = distribution,
+                     n.trees = iteration,
+                     shrinkage = lambda,
+                     interaction.depth = depth,
+                     verbose = F)
+Y.hat <- predict.gbm(gbm.fit, X_0, n.trees = iteration, type="response")
+Y.hat[Y.hat >= 0.5] <- 1
+Y.hat[Y.hat <  0.5] <- 0
+
+# Best bagged trees
+ntrees <- 500
+out.rf         <- randomForest(X, as.factor(Y), ntree=ntrees, mtry=ncol(X))
+bag.yhat.test  <- predict(out.rf, X_0, type='class')
+
+print(paste("Lambda=", lambda, ", M=", depth, ", iterations=",
+            iteration, ", misclassification rate for boosted trees:",
+            round(miss.class(Y.hat, Y_0, produceOutput = T), 4)))
+print(paste("With ntrees = ", ntrees, ", the misclassification rate for the",
+            "bagged trees is", round(miss.class(bag.yhat.test,
+                                               Y_0, produceOutput = T),4),"."))
+
+
+```
+
+Now, let's try to build a spam classifier using support vector machines.
+
+We'll compare three different kernels: linear, radial basis, and polynomial.
+
+```{r results='hold'}
+
+require(e1071)
+
+# SVM function requires data frame objects
+df.train <- data.frame(X=X, Y=Y)
+df.test  <- data.frame(X=X_0, Y=Y_0)
+
+# Fit SVMs with linear, radial, and polynomial kernels
+svm.lin <- tune(svm, Y ~ ., data=df.train, kernel="linear", type='C',
+                ranges=list(0.001, 0.01, 0.1, 1))
+svm.rad <- tune(svm, Y ~ ., data=df.train, kernel="radial", type='C',
+                gamma=c(1, 2), ranges=list(0.1, 1, 10, 100))
+svm.pol <- tune(svm, Y ~ ., data=df.train, kernel="polynomial", type='C',
+                degree=c(3, 5, 10), ranges=list(0.1, 1, 10, 100))
+
+# Select the best model as determined by CV
+lin.mod <- svm.lin$best.model
+rad.mod <- svm.rad$best.model
+pol.mod <- svm.pol$best.model
+
+# Make predictions with best model
+yhat.lin <- predict(lin.mod, df.test)
+yhat.rad <- predict(rad.mod, df.test)
+yhat.pol <- predict(pol.mod, df.test)
+
+print("SVM with linear kernel")
+mc.lin <- miss.class(yhat.lin, Y_0)
+mc.lin
+print(paste("Sensitivity:", round(mc.lin[2, 2] / sum(mc.lin[, 2]), 4),
+            "Specificity:", round(mc.lin[1, 1] / sum(mc.lin[, 1]), 4),
+            "Misclass Rate:", round(miss.class(yhat.lin, Y_0, produceOutput=T),4)))
+
+print("SVM with radial kernel")
+mc.rad <- miss.class(yhat.rad, Y_0)
+mc.rad
+print(paste("Sensitivity:", round(mc.rad[2, 2] / sum(mc.rad[, 2]), 4),
+            "Specificity:", round(mc.rad[1, 1] / sum(mc.rad[, 1]), 4),
+            "Misclass Rate:",round(miss.class(yhat.rad,Y_0,produceOutput=T),4)))
+
+print("SVM with polynomial kernel")
+mc.pol <- miss.class(yhat.pol, Y_0)
+mc.pol
+print(paste("Sensitivity:", round(mc.pol[2, 2] / sum(mc.pol[, 2]), 4),
+            "Specificity:", round(mc.pol[1, 1] / sum(mc.pol[, 1]), 4),
+            "Misclass Rate:",round(miss.class(yhat.pol,Y_0,produceOutput=T),4)))
+
+```
+
+While SVM originated as a binary classification technique, we can perform 3 class classification using one-vs-one or one-vs-all SVM. In this case, we'll demonstrate the one-vs-one implementation. To produce the 3 classes, we run a logistic regression with all features and all the training and test data. We then bin the estimate probabilities into three groups: [0, *t*], (*t*, *u*], (*u*, 1] for *t*, *u* to produce roughly equal number of observations in each class. Then we re-separate the data into training/test. 
+
+```{r results='hold'}
+
+# Credit: Darren Homrighausen (http://www.stat.colostate.edu/~darrenho/) for
+# following code.
+
+glm.fit <- glm(spam$Y ~ ., data = spam$XdataF, family = 'binomial')
+probs <- predict(glm.fit, type='response')
+
+# Identify cut points for the three classes
+quant <- quantile(probs, c(.33, .66))
+t <- quant[1]
+u <- quant[2]
+
+# Create new classes for Y with cut points
+Y_class <- rep(0, length(spam$Y))
+Y_class[probs > t & probs <= u] <- 1
+Y_class[probs > u] <- 2
+
+# Re-separate the data into training and test sets
+Y     <- as.factor(Y_class[train])
+Y_0   <- as.factor(Y_class[test])
+
+```
+
+Let's choose our best kernel and fit a one-vs-one SVM to build the classifier.
+
+```{r results='hold'}
+
+# SVM function requires data frame objects
+df.train <- data.frame(X=X, Y=Y)
+df.test  <- data.frame(X=X_0, Y=Y_0)
+
+# One-versus-one SVM
+svm.one <- tune(svm, Y ~ ., data=df.train, kernel="linear", type='C',
+                ranges=list(0.001, 0.01, 0.1, 1))
+yhat.one <- predict(svm.one$best.model, df.test)
+
+# Misclassification rates
+print("Multiclass SVM: one-vs-one")
+miss.class(yhat.one, Y_0)
